@@ -23,9 +23,10 @@ use crate::context::Context;
 // }
 
 /// The factory for compiled strategy objects
-pub type Strategy2 =
-    Box<dyn Fn(Option<HashMap<String, String>>) -> Evaluator2 + Sync + Send + 'static>;
+// pub type Strategy2 =
+//     Box<dyn Fn(Option<HashMap<String, String>>) -> Evaluator2 + Sync + Send + 'static>;
 /// Apply memoised state to a context.
+
 #[enum_dispatch]
 pub trait Evaluator2 {
     fn evaluate(&self, context: &Context) -> bool;
@@ -45,11 +46,18 @@ pub enum DefaultStrategies {
     flexibleRollout2,
 }
 
+fn compile_default2<T>(_parameters: Option<HashMap<String, String>>) -> T
+where
+    T: From<default2>,
+{
+    default2.into()
+}
+
 pub struct default2;
 
 impl Evaluator2 for default2 {
     fn evaluate(&self, context: &Context) -> bool {
-        false
+        true
     }
 }
 
@@ -360,7 +368,16 @@ mod tests {
     use ipaddress::IPAddress;
     use maplit::hashmap;
 
+    use super::Evaluator2;
     use crate::context::Context;
+
+    #[test]
+    fn test_default() {
+        assert_eq!(
+            true,
+            super::compile_default2::<super::DefaultStrategies>(None).evaluate(&Context::default())
+        )
+    }
 
     #[test]
     fn test_user_with_id() {

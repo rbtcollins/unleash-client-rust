@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
 use chrono::Utc;
+use enum_dispatch::enum_dispatch;
 use enum_map::{Enum, EnumMap};
 use futures_timer::Delay;
 use log::{debug, trace, warn};

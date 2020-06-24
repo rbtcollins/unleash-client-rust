@@ -6,10 +6,107 @@ use std::hash::BuildHasher;
 use std::io::Cursor;
 use std::io::Read;
 
+use enum_dispatch::enum_dispatch;
 use murmur3::murmur3_32;
 use rand::Rng;
 
 use crate::context::Context;
+
+// #[enum_dispatch]
+/// A strategy for Unleash. Variants of this are embedded into an Enum using
+/// enum-dispatch and this should compile their state into  their own struct.
+// pub trait Strategy2 {
+//     /// Compile the strategies options for later evaluation against a context.
+//     fn compile(Option<HashMap<String, String>>);
+//     /// Evaluate the compiled context against the context.
+//     fn evaluate(&Context) -> bool);
+// }
+
+/// The factory for compiled strategy objects
+pub type Strategy2 =
+    Box<dyn Fn(Option<HashMap<String, String>>) -> Evaluator2 + Sync + Send + 'static>;
+/// Apply memoised state to a context.
+#[enum_dispatch]
+pub trait Evaluator2 {
+    fn evaluate(&self, context: &Context) -> bool;
+}
+
+// TODO: a derive macro that lets folk get the default strategies included
+#[allow(non_camel_case_types)]
+#[enum_dispatch(Evaluator2)]
+pub enum DefaultStrategies {
+    default2,
+    applicationHostname2,
+    gradualRolloutRandom2,
+    gradualRolloutSessionId2,
+    gradualRolloutUserId2,
+    remoteAddress2,
+    userWithId2,
+    flexibleRollout2,
+}
+
+pub struct default2;
+
+impl Evaluator2 for default2 {
+    fn evaluate(&self, context: &Context) -> bool {
+        false
+    }
+}
+
+pub struct applicationHostname2;
+
+impl Evaluator2 for applicationHostname2 {
+    fn evaluate(&self, context: &Context) -> bool {
+        false
+    }
+}
+
+pub struct gradualRolloutRandom2;
+
+impl Evaluator2 for gradualRolloutRandom2 {
+    fn evaluate(&self, context: &Context) -> bool {
+        false
+    }
+}
+
+pub struct gradualRolloutSessionId2;
+
+impl Evaluator2 for gradualRolloutSessionId2 {
+    fn evaluate(&self, context: &Context) -> bool {
+        false
+    }
+}
+pub struct gradualRolloutUserId2;
+
+impl Evaluator2 for gradualRolloutUserId2 {
+    fn evaluate(&self, context: &Context) -> bool {
+        false
+    }
+}
+
+pub struct remoteAddress2;
+
+impl Evaluator2 for remoteAddress2 {
+    fn evaluate(&self, context: &Context) -> bool {
+        false
+    }
+}
+
+pub struct userWithId2;
+
+impl Evaluator2 for userWithId2 {
+    fn evaluate(&self, context: &Context) -> bool {
+        false
+    }
+}
+
+pub struct flexibleRollout2;
+
+impl Evaluator2 for flexibleRollout2 {
+    fn evaluate(&self, context: &Context) -> bool {
+        false
+    }
+}
 
 /// Memoise feature state for a strategy.
 pub type Strategy =

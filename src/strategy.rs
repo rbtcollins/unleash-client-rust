@@ -22,97 +22,320 @@ use crate::context::Context;
 //     fn evaluate(&Context) -> bool);
 // }
 
-/// The factory for compiled strategy objects
-// pub type Strategy2 =
-//     Box<dyn Fn(Option<HashMap<String, String>>) -> Evaluator2 + Sync + Send + 'static>;
-/// Apply memoised state to a context.
+/// Compile a parameters hash into a strategy trait instance
+pub type Strategy2<E> = Box<dyn Fn(Option<HashMap<String, String>>) -> E + Sync + Send + 'static>;
 
+// This will error in RLS : see https://github.com/rust-lang/rls/issues/1682
 #[enum_dispatch]
 pub trait Evaluator2 {
     fn evaluate(&self, context: &Context) -> bool;
 }
 
 // TODO: a derive macro that lets folk get the default strategies included
-#[allow(non_camel_case_types)]
 #[enum_dispatch(Evaluator2)]
 pub enum DefaultStrategies {
-    default2,
-    applicationHostname2,
-    gradualRolloutRandom2,
-    gradualRolloutSessionId2,
-    gradualRolloutUserId2,
-    remoteAddress2,
-    userWithId2,
-    flexibleRollout2,
+    Default2,
+    Constant2,
+    Random2,
+    SessionId2,
+    UserId2,
+    RemoteAddress2,
+    UserWithId2,
+    FlexibleRollout2,
 }
 
-fn compile_default2<T>(_parameters: Option<HashMap<String, String>>) -> T
+/// https://unleash.github.io/docs/activation_strategy#default
+/// parameters: None
+/// context: None
+pub fn compile_default2<T>(_parameters: Option<HashMap<String, String>>) -> T
 where
-    T: From<default2>,
+    T: From<Default2>,
 {
-    default2.into()
+    Default2.into()
 }
 
-pub struct default2;
+pub struct Default2;
 
-impl Evaluator2 for default2 {
-    fn evaluate(&self, context: &Context) -> bool {
+impl Evaluator2 for Default2 {
+    fn evaluate(&self, _context: &Context) -> bool {
         true
     }
 }
 
-pub struct applicationHostname2;
+/// https://unleash.github.io/docs/activation_strategy#applicationhostname
+/// parameters:
+///     hostNames: names,of,hosts
+/// context: None
+pub fn compile_hostname2<T>(parameters: Option<HashMap<String, String>>) -> T
+where
+    T: From<Constant2>,
+{
+    let mut result = false;
+    hostname::get().ok().and_then(|this_hostname| {
+        parameters.map(|parameters| {
+            parameters.get("hostNames").map(|hostnames: &String| {
+                for hostname in hostnames.split(',') {
+                    if this_hostname == hostname {
+                        result = true;
+                    }
+                }
+                false
+            })
+        })
+    });
+    Constant2 { result }.into()
+}
 
-impl Evaluator2 for applicationHostname2 {
+/// https://unleash.github.io/docs/activation_strategy#gradualrolloutrandom
+/// parameters:
+///     percentage: percentage 0-100
+pub fn compile_random2<T>(parameters: Option<HashMap<String, String>>) -> T
+where
+    T: From<Random2>,
+{
+    _compile_random(parameters, "percentage")
+}
+
+/// https://unleash.github.io/docs/activation_strategy#gradualrolloutsessionid
+/// parameters:
+///     percentage: 0-100
+///     groupId: hash key
+pub fn compile_session_id2<T, S: BuildHasher>(parameters: Option<HashMap<String, String, S>>) -> T
+where
+    T: From<SessionId2>,
+{
+    _compile_session_id(parameters, "percentage")
+}
+
+/// https://unleash.github.io/docs/activation_strategy#gradualrolloutuserid
+/// parameters:
+///     percentage: 0-100
+///     groupId: hash key
+pub fn compile_user_id2<S: BuildHasher, T>(parameters: Option<HashMap<String, String, S>>) -> T
+where
+    T: From<UserId2>,
+{
+    _compile_user_id(parameters, "percentage")
+}
+
+/// https://unleash.github.io/docs/activation_strategy#remoteaddress
+/// parameters:
+///     IPS: 1.2.3.4,AB::CD::::EF,1.2/8
+pub fn compile_remote_address2<T, S: BuildHasher>(
+    parameters: Option<HashMap<String, String, S>>,
+) -> T
+where
+    T: From<RemoteAddress2>,
+{
+    // TODO: this could be optimised given the inherent radix structure, but its
+    // not exactly hot-path.
+    let mut ips: Vec<ipaddress::IPAddress> = Vec::new();
+    if let Some(parameters) = parameters {
+        if let Some(ips_str) = parameters.get("IPS") {
+            for ip_str in ips_str.split(',') {
+                let ip_parsed = ipaddress::IPAddress::parse(ip_str);
+                if let Ok(ip) = ip_parsed {
+                    ips.push(ip)
+                }
+            }
+        }
+    }
+    RemoteAddress2 { ips }.into()
+}
+
+pub struct RemoteAddress2 {
+    ips: Vec<ipaddress::IPAddress>,
+}
+
+impl Evaluator2 for RemoteAddress2 {
     fn evaluate(&self, context: &Context) -> bool {
+        if let Some(remote_address) = &context.remote_address {
+            for ip in &self.ips {
+                if ip.includes(&remote_address) {
+                    return true;
+                }
+            }
+        }
         false
     }
 }
 
-pub struct gradualRolloutRandom2;
+/// https://unleash.github.io/docs/activation_strategy#userwithid
+/// parameters:
+///     userIds: user,ids,to,match
+pub fn compile_user_with_id2<T, S: BuildHasher>(parameters: Option<HashMap<String, String, S>>) -> T
+where
+    T: From<UserWithId2>,
+{
+    let mut uids: HashSet<String> = HashSet::new();
+    if let Some(parameters) = parameters {
+        if let Some(uids_list) = parameters.get("userIds") {
+            for uid in uids_list.split(',') {
+                uids.insert(uid.into());
+            }
+        }
+    }
+    UserWithId2 { uids }.into()
+}
 
-impl Evaluator2 for gradualRolloutRandom2 {
+pub struct UserWithId2 {
+    uids: HashSet<String>,
+}
+
+impl Evaluator2 for UserWithId2 {
     fn evaluate(&self, context: &Context) -> bool {
-        false
+        context
+            .user_id
+            .as_ref()
+            .map(|uid| self.uids.contains(uid))
+            .unwrap_or(false)
     }
 }
 
-pub struct gradualRolloutSessionId2;
-
-impl Evaluator2 for gradualRolloutSessionId2 {
-    fn evaluate(&self, context: &Context) -> bool {
-        false
+/// https://unleash.github.io/docs/activation_strategy#flexiblerollout
+/// parameters:
+///     stickiness: [DEFAULT|USERID|SESSIONID|RANDOM]
+///     groupId: hash key
+///     rollout: percentage
+pub fn compile_flexible_rollout2<T, S: BuildHasher>(
+    parameters: Option<HashMap<String, String, S>>,
+) -> T
+where
+    T: From<Constant2> + From<Random2> + From<UserId2> + From<SessionId2> + From<FlexibleRollout2>,
+{
+    let unwrapped_parameters = if let Some(parameters) = &parameters {
+        parameters
+    } else {
+        return Constant2 { result: false }.into();
+    };
+    match if let Some(stickiness) = unwrapped_parameters.get("stickiness") {
+        stickiness.as_str()
+    } else {
+        return Constant2 { result: false }.into();
+    } {
+        "DEFAULT" => {
+            // user, session, random in that order.
+            let (group, rollout) = _group_and_rollout(parameters, "rollout");
+            FlexibleRollout2 { group, rollout }.into()
+        }
+        "USERID" => _compile_user_id(parameters, "rollout"),
+        "SESSIONID" => _compile_session_id(parameters, "rollout"),
+        "RANDOM" => _compile_random(parameters, "rollout"),
+        _ => Constant2 { result: false }.into(),
     }
 }
-pub struct gradualRolloutUserId2;
 
-impl Evaluator2 for gradualRolloutUserId2 {
+pub struct FlexibleRollout2 {
+    group: String,
+    rollout: u32,
+}
+
+impl Evaluator2 for FlexibleRollout2 {
     fn evaluate(&self, context: &Context) -> bool {
-        false
+        if context.user_id.is_some() {
+            _partial_rollout(&self.group, context.user_id.as_ref(), self.rollout)
+        } else if context.session_id.is_some() {
+            _partial_rollout(&self.group, context.session_id.as_ref(), self.rollout)
+        } else {
+            let picked = rand::thread_rng().gen_range(0, 100);
+            self.rollout > picked
+        }
     }
 }
 
-pub struct remoteAddress2;
+// ---------- helpers that aren't strategies on their own -----------
 
-impl Evaluator2 for remoteAddress2 {
-    fn evaluate(&self, context: &Context) -> bool {
-        false
+/// Return a constant result
+pub struct Constant2 {
+    result: bool,
+}
+
+impl Evaluator2 for Constant2 {
+    fn evaluate(&self, _context: &Context) -> bool {
+        self.result
     }
 }
 
-pub struct userWithId2;
+// Build a struct to handle random rollouts, parameterised by a
+// metaparameter of the percentage taken from rollout_key.
+pub fn _compile_random<S: BuildHasher, T>(
+    parameters: Option<HashMap<String, String, S>>,
+    rollout_key: &str,
+) -> T
+where
+    T: From<Random2>,
+{
+    let mut pct = 0;
+    if let Some(parameters) = parameters {
+        if let Some(pct_str) = parameters.get(rollout_key) {
+            if let Ok(percent) = pct_str.parse::<u8>() {
+                pct = percent
+            }
+        }
+    }
+    Random2 { pct }.into()
+}
+pub struct Random2 {
+    pct: u8,
+}
 
-impl Evaluator2 for userWithId2 {
-    fn evaluate(&self, context: &Context) -> bool {
-        false
+impl Evaluator2 for Random2 {
+    fn evaluate(&self, _context: &Context) -> bool {
+        let mut rng = rand::thread_rng();
+        let picked = rng.gen_range(0, 100);
+        self.pct > picked
     }
 }
 
-pub struct flexibleRollout2;
+// --------------------------------------------------------
 
-impl Evaluator2 for flexibleRollout2 {
+// Build a struct to handle session id rollouts, parameterised by groupId and a
+// metaparameter of the percentage taken from rollout_key.
+fn _compile_session_id<S: BuildHasher, T>(
+    parameters: Option<HashMap<String, String, S>>,
+    rollout_key: &str,
+) -> T
+where
+    T: From<SessionId2>,
+{
+    let (group, rollout) = _group_and_rollout(parameters, rollout_key);
+    SessionId2 { group, rollout }.into()
+}
+
+pub struct SessionId2 {
+    group: String,
+    rollout: u32,
+}
+
+impl Evaluator2 for SessionId2 {
     fn evaluate(&self, context: &Context) -> bool {
-        false
+        _partial_rollout(&self.group, context.session_id.as_ref(), self.rollout)
+    }
+}
+
+// ------------------------------------------------
+
+// Build a struct to handle user id rollouts, parameterised by groupId and a
+// metaparameter of the percentage taken from rollout_key.
+fn _compile_user_id<S: BuildHasher, T>(
+    parameters: Option<HashMap<String, String, S>>,
+    rollout_key: &str,
+) -> T
+where
+    T: From<UserId2>,
+{
+    let (group, rollout) = _group_and_rollout(parameters, rollout_key);
+    UserId2 { group, rollout }.into()
+}
+
+pub struct UserId2 {
+    group: String,
+    rollout: u32,
+}
+
+impl Evaluator2 for UserId2 {
+    fn evaluate(&self, context: &Context) -> bool {
+        _partial_rollout(&self.group, context.user_id.as_ref(), self.rollout)
     }
 }
 
@@ -376,7 +599,7 @@ mod tests {
         assert_eq!(
             true,
             super::compile_default2::<super::DefaultStrategies>(None).evaluate(&Context::default())
-        )
+        );
     }
 
     #[test]
@@ -393,17 +616,41 @@ mod tests {
         );
         assert_eq!(
             true,
+            super::compile_user_with_id2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&Context {
+                    user_id: Some("fred".into()),
+                    ..Default::default()
+                })
+        );
+        assert_eq!(
+            true,
             super::user_with_id(Some(params.clone()))(&Context {
                 user_id: Some("barney".into()),
                 ..Default::default()
             })
         );
         assert_eq!(
+            true,
+            super::compile_user_with_id2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&Context {
+                    user_id: Some("barney".into()),
+                    ..Default::default()
+                })
+        );
+        assert_eq!(
             false,
-            super::user_with_id(Some(params))(&Context {
+            super::user_with_id(Some(params.clone()))(&Context {
                 user_id: Some("betty".into()),
                 ..Default::default()
             })
+        );
+        assert_eq!(
+            false,
+            super::compile_user_with_id2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&Context {
+                    user_id: Some("betty".into()),
+                    ..Default::default()
+                })
         );
     }
     #[test]
@@ -414,14 +661,24 @@ mod tests {
             "rollout".into() => "0".into(),
         };
         let c: Context = Default::default();
-        assert_eq!(false, super::flexible_rollout(Some(params))(&c));
+        assert_eq!(false, super::flexible_rollout(Some(params.clone()))(&c));
+        assert_eq!(
+            false,
+            super::compile_flexible_rollout2::<super::DefaultStrategies, _>(Some(params))
+                .evaluate(&c)
+        );
 
         let params: HashMap<String, String> = hashmap! {
             "stickiness".into() => "RANDOM".into(),
             "rollout".into() => "100".into(),
         };
         let c: Context = Default::default();
-        assert_eq!(true, super::flexible_rollout(Some(params))(&c));
+        assert_eq!(true, super::flexible_rollout(Some(params.clone()))(&c));
+        assert_eq!(
+            true,
+            super::compile_flexible_rollout2::<super::DefaultStrategies, _>(Some(params))
+                .evaluate(&c)
+        );
 
         // Could parameterise this by SESSION and USER, but its barely long
         // enough to bother and the explicitness in failures has merit.
@@ -435,7 +692,13 @@ mod tests {
             session_id: Some("session1".into()),
             ..Default::default()
         };
-        assert_eq!(false, super::flexible_rollout(Some(params))(&c));
+        assert_eq!(false, super::flexible_rollout(Some(params.clone()))(&c));
+        assert_eq!(
+            false,
+            super::compile_flexible_rollout2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&c)
+        );
+
         let params: HashMap<String, String> = hashmap! {
             "stickiness".into() => "SESSIONID".into(),
             "groupId".into() => "group1".into(),
@@ -445,7 +708,13 @@ mod tests {
             session_id: Some("session1".into()),
             ..Default::default()
         };
-        assert_eq!(true, super::flexible_rollout(Some(params))(&c));
+        assert_eq!(true, super::flexible_rollout(Some(params.clone()))(&c));
+        assert_eq!(
+            true,
+            super::compile_flexible_rollout2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&c)
+        );
+
         // Check rollout works
         let params: HashMap<String, String> = hashmap! {
             "stickiness".into() => "SESSIONID".into(),
@@ -457,11 +726,21 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(true, super::flexible_rollout(Some(params.clone()))(&c));
+        assert_eq!(
+            true,
+            super::compile_flexible_rollout2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&c)
+        );
         let c: Context = Context {
             session_id: Some("session3".into()),
             ..Default::default()
         };
-        assert_eq!(false, super::flexible_rollout(Some(params))(&c));
+        assert_eq!(false, super::flexible_rollout(Some(params.clone()))(&c));
+        assert_eq!(
+            false,
+            super::compile_flexible_rollout2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&c)
+        );
         // Check groupId modifies the hash order
         let params: HashMap<String, String> = hashmap! {
             "stickiness".into() => "SESSIONID".into(),
@@ -473,11 +752,21 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(false, super::flexible_rollout(Some(params.clone()))(&c));
+        assert_eq!(
+            false,
+            super::compile_flexible_rollout2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&c)
+        );
         let c: Context = Context {
             session_id: Some("session3".into()),
             ..Default::default()
         };
-        assert_eq!(true, super::flexible_rollout(Some(params))(&c));
+        assert_eq!(true, super::flexible_rollout(Some(params.clone()))(&c));
+        assert_eq!(
+            true,
+            super::compile_flexible_rollout2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&c)
+        );
 
         // USERID
         let params: HashMap<String, String> = hashmap! {
@@ -489,7 +778,12 @@ mod tests {
             user_id: Some("user1".into()),
             ..Default::default()
         };
-        assert_eq!(false, super::flexible_rollout(Some(params))(&c));
+        assert_eq!(false, super::flexible_rollout(Some(params.clone()))(&c));
+        assert_eq!(
+            false,
+            super::compile_flexible_rollout2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&c)
+        );
         let params: HashMap<String, String> = hashmap! {
             "stickiness".into() => "USERID".into(),
             "groupId".into() => "group1".into(),
@@ -499,7 +793,12 @@ mod tests {
             user_id: Some("user1".into()),
             ..Default::default()
         };
-        assert_eq!(true, super::flexible_rollout(Some(params))(&c));
+        assert_eq!(true, super::flexible_rollout(Some(params.clone()))(&c));
+        assert_eq!(
+            true,
+            super::compile_flexible_rollout2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&c)
+        );
         // Check rollout works
         let params: HashMap<String, String> = hashmap! {
             "stickiness".into() => "USERID".into(),
@@ -511,11 +810,21 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(true, super::flexible_rollout(Some(params.clone()))(&c));
+        assert_eq!(
+            true,
+            super::compile_flexible_rollout2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&c)
+        );
         let c: Context = Context {
             user_id: Some("user3".into()),
             ..Default::default()
         };
-        assert_eq!(false, super::flexible_rollout(Some(params))(&c));
+        assert_eq!(false, super::flexible_rollout(Some(params.clone()))(&c));
+        assert_eq!(
+            false,
+            super::compile_flexible_rollout2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&c)
+        );
         // Check groupId modifies the hash order
         let params: HashMap<String, String> = hashmap! {
             "stickiness".into() => "USERID".into(),
@@ -527,11 +836,21 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(false, super::flexible_rollout(Some(params.clone()))(&c));
+        assert_eq!(
+            false,
+            super::compile_flexible_rollout2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&c)
+        );
         let c: Context = Context {
             user_id: Some("user3".into()),
             ..Default::default()
         };
-        assert_eq!(true, super::flexible_rollout(Some(params))(&c));
+        assert_eq!(true, super::flexible_rollout(Some(params.clone()))(&c));
+        assert_eq!(
+            true,
+            super::compile_flexible_rollout2::<super::DefaultStrategies, _>(Some(params))
+                .evaluate(&c)
+        );
     }
 
     #[test]
@@ -540,12 +859,20 @@ mod tests {
             "percentage".into() => "0".into()
         };
         let c: Context = Default::default();
-        assert_eq!(false, super::random(Some(params))(&c));
+        assert_eq!(false, super::random(Some(params.clone()))(&c));
+        assert_eq!(
+            false,
+            super::compile_random2::<super::DefaultStrategies>(Some(params)).evaluate(&c)
+        );
         let params: HashMap<String, String> = hashmap! {
             "percentage".into() => "100".into()
         };
         let c: Context = Default::default();
-        assert_eq!(true, super::random(Some(params))(&c));
+        assert_eq!(true, super::random(Some(params.clone()))(&c));
+        assert_eq!(
+            true,
+            super::compile_random2::<super::DefaultStrategies>(Some(params)).evaluate(&c)
+        );
     }
 
     #[test]
@@ -558,21 +885,41 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(true, super::remote_address(Some(params.clone()))(&c));
+        assert_eq!(
+            true,
+            super::compile_remote_address2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&c)
+        );
         let c: Context = Context {
             remote_address: Some(IPAddress::parse("2.3.4.5").unwrap()),
             ..Default::default()
         };
         assert_eq!(true, super::remote_address(Some(params.clone()))(&c));
+        assert_eq!(
+            true,
+            super::compile_remote_address2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&c)
+        );
         let c: Context = Context {
             remote_address: Some(IPAddress::parse("2222:FF:0:1234::FDEC").unwrap()),
             ..Default::default()
         };
         assert_eq!(true, super::remote_address(Some(params.clone()))(&c));
+        assert_eq!(
+            true,
+            super::compile_remote_address2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&c)
+        );
         let c: Context = Context {
             remote_address: Some(IPAddress::parse("2.3.4.4").unwrap()),
             ..Default::default()
         };
-        assert_eq!(false, super::remote_address(Some(params))(&c));
+        assert_eq!(false, super::remote_address(Some(params.clone()))(&c));
+        assert_eq!(
+            false,
+            super::compile_remote_address2::<super::DefaultStrategies, _>(Some(params.clone()))
+                .evaluate(&c)
+        );
     }
 
     #[test]
@@ -582,10 +929,18 @@ mod tests {
         let params: HashMap<String, String> = hashmap! {
             "hostNames".into() => format!("foo,{},bar", this_hostname)
         };
-        assert_eq!(true, super::hostname(Some(params))(&c));
+        assert_eq!(true, super::hostname(Some(params.clone()))(&c));
+        assert_eq!(
+            true,
+            super::compile_hostname2::<super::DefaultStrategies>(Some(params)).evaluate(&c)
+        );
         let params: HashMap<String, String> = hashmap! {
             "hostNames".into() => "foo,bar".into()
         };
-        assert_eq!(false, super::hostname(Some(params))(&c));
+        assert_eq!(false, super::hostname(Some(params.clone()))(&c));
+        assert_eq!(
+            false,
+            super::compile_hostname2::<super::DefaultStrategies>(Some(params)).evaluate(&c)
+        );
     }
 }

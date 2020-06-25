@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
 use chrono::Utc;
-use enum_dispatch::enum_dispatch;
 use enum_map::{Enum, EnumMap};
 use futures_timer::Delay;
 use log::{debug, trace, warn};
@@ -21,20 +20,28 @@ use crate::context::Context;
 use crate::http::HTTP;
 use crate::strategy;
 
-pub struct ClientBuilder {
+/// Build a Client
+/// E should be an enum covering all the strategies that you need.
+pub struct ClientBuilder<E = strategy::DefaultStrategies>
+where
+    E: strategy::Evaluator2,
+{
     enable_str_features: bool,
     interval: u64,
-    strategies: HashMap<String, strategy::Strategy>,
+    strategies: HashMap<String, (strategy::Strategy, strategy::Strategy2<E>)>,
 }
 
-impl ClientBuilder {
+impl<E> ClientBuilder<E>
+where
+    E: strategy::Evaluator2,
+{
     pub fn into_client<C, F>(
         self,
         api_url: &str,
         app_name: &str,
         instance_id: &str,
         authorization: Option<String>,
-    ) -> Result<Client<C, F>, http_client::Error>
+    ) -> Result<Client<C, F, E>, http_client::Error>
     where
         C: http_client::HttpClient + Default,
         F: Enum<CachedFeature> + Debug + DeserializeOwned + Serialize,
@@ -62,29 +69,68 @@ impl ClientBuilder {
         self
     }
 
-    pub fn strategy(mut self, name: &str, strategy: strategy::Strategy) -> Self {
-        self.strategies.insert(name.into(), strategy);
+    pub fn strategy(
+        mut self,
+        name: &str,
+        strategy: strategy::Strategy,
+        strategy2: strategy::Strategy2<E>,
+    ) -> Self {
+        self.strategies.insert(name.into(), (strategy, strategy2));
         self
     }
 }
 
-impl Default for ClientBuilder {
-    fn default() -> ClientBuilder {
+impl<E> Default for ClientBuilder<E>
+where
+    E: strategy::Evaluator2,
+{
+    fn default() -> Self {
         let result = ClientBuilder {
             enable_str_features: false,
             interval: 15000,
             strategies: Default::default(),
         };
         result
-            .strategy("default", Box::new(&strategy::default))
-            .strategy("applicationHostname", Box::new(&strategy::hostname))
-            .strategy("default", Box::new(&strategy::default))
-            .strategy("gradualRolloutRandom", Box::new(&strategy::random))
-            .strategy("gradualRolloutSessionId", Box::new(&strategy::session_id))
-            .strategy("gradualRolloutUserId", Box::new(&strategy::user_id))
-            .strategy("remoteAddress", Box::new(&strategy::remote_address))
-            .strategy("userWithId", Box::new(&strategy::user_with_id))
-            .strategy("flexibleRollout", Box::new(&strategy::flexible_rollout))
+            .strategy(
+                "default",
+                Box::new(&strategy::default),
+                Box::new(&strategy::compile_default2),
+            )
+            .strategy(
+                "applicationHostname",
+                Box::new(&strategy::hostname),
+                Box::new(&strategy::compile_hostname2),
+            )
+            .strategy(
+                "gradualRolloutRandom",
+                Box::new(&strategy::random),
+                Box::new(&strategy::compile_random2),
+            )
+            .strategy(
+                "gradualRolloutSessionId",
+                Box::new(&strategy::session_id),
+                Box::new(&strategy::compile_session_id2),
+            )
+            .strategy(
+                "gradualRolloutUserId",
+                Box::new(&strategy::user_id),
+                Box::new(&strategy::compile_user_id2),
+            )
+            .strategy(
+                "remoteAddress",
+                Box::new(&strategy::remote_address),
+                Box::new(&strategy::compile_remote_address2),
+            )
+            .strategy(
+                "userWithId",
+                Box::new(&strategy::user_with_id),
+                Box::new(&strategy::compile_user_with_id2),
+            )
+            .strategy(
+                "flexibleRollout",
+                Box::new(&strategy::flexible_rollout),
+                Box::new(&strategy::compile_flexible_rollout2),
+            )
     }
 }
 
@@ -112,10 +158,11 @@ where
     str_features: HashMap<String, CachedFeature>,
 }
 
-pub struct Client<C, F>
+pub struct Client<C, F, E = strategy::DefaultStrategies>
 where
     C: http_client::HttpClient,
     F: Enum<CachedFeature> + Debug + DeserializeOwned + Serialize,
+    E: strategy::Evaluator2,
 {
     api_url: String,
     app_name: String,
@@ -125,15 +172,16 @@ where
     polling: AtomicBool,
     http: HTTP<C>,
     // known strategies: strategy_name : memoiser
-    strategies: Mutex<HashMap<String, strategy::Strategy>>,
+    strategies: Mutex<HashMap<String, (strategy::Strategy, strategy::Strategy2<E>)>>,
     // memoised state: feature_name: [callback, callback, ...]
     cached_state: ArcSwapOption<CachedState<F>>,
 }
 
-impl<C, F> Client<C, F>
+impl<C, F, E> Client<C, F, E>
 where
     C: http_client::HttpClient + std::default::Default,
     F: Enum<CachedFeature> + Clone + Debug + DeserializeOwned + Serialize,
+    E: strategy::Evaluator2,
 {
     pub fn is_enabled(&self, feature_enum: F, context: Option<&Context>, default: bool) -> bool {
         trace!(
@@ -525,6 +573,7 @@ mod tests {
     use std::collections::hash_set::HashSet;
     use std::hash::BuildHasher;
 
+    use enum_dispatch::enum_dispatch;
     use enum_map::Enum;
     use maplit::hashmap;
     use serde::{Deserialize, Serialize};
@@ -532,7 +581,7 @@ mod tests {
     use super::ClientBuilder;
     use crate::api::{Feature, Features, Strategy};
     use crate::context::Context;
-    use crate::strategy;
+    use crate::strategy::{self, Default2, Evaluator2};
 
     fn features() -> Features {
         Features {
@@ -712,6 +761,38 @@ mod tests {
                 .unwrap_or(false)
         })
     }
+
+    fn _compile_reversed_uids<T, S: BuildHasher>(
+        parameters: Option<HashMap<String, String, S>>,
+    ) -> T
+    where
+        T: From<Reversed>,
+    {
+        let mut uids: HashSet<String> = HashSet::new();
+        if let Some(parameters) = parameters {
+            if let Some(uids_list) = parameters.get("userIds") {
+                for uid in uids_list.split(',') {
+                    uids.insert(uid.chars().rev().collect());
+                }
+            }
+        }
+        Reversed { uids }.into()
+    }
+
+    struct Reversed {
+        uids: HashSet<String>,
+    }
+
+    impl strategy::Evaluator2 for Reversed {
+        fn evaluate(&self, context: &Context) -> bool {
+            context
+                .user_id
+                .as_ref()
+                .map(|uid| self.uids.contains(uid))
+                .unwrap_or(false)
+        }
+    }
+
     #[test]
     fn test_custom_strategy() {
         let _ = simple_logger::init();
@@ -721,8 +802,19 @@ mod tests {
             default,
             reversed,
         }
-        let client = ClientBuilder::default()
-            .strategy("reversed", Box::new(&_reversed_uids))
+
+        #[enum_dispatch(Evaluator2)]
+        enum Strategies {
+            Default2,
+            Reversed,
+        }
+
+        let client = ClientBuilder::<Strategies>::default()
+            .strategy(
+                "reversed",
+                Box::new(&_reversed_uids),
+                Box::new(&_compile_reversed_uids),
+            )
             .into_client::<http_client::native::NativeClient, UserFeatures>(
                 "http://127.0.0.1:1234/",
                 "foo",
